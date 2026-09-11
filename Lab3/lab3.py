@@ -1,0 +1,342 @@
+"""
+NUS CS4243 Lab3 AY25/26: Image Segmentation and Texture Description - Assignment.
+TA: He Qiyuan.
+"""
+import numpy as np
+import cv2
+from scipy.ndimage import convolve
+
+
+# ============================================================
+# Part 1: Mean-Shift Segmentation (L05)
+# ============================================================
+
+# TASK 1.1 #
+def construct_feature_space(image: np.array, spatial_weight: float) -> np.array:
+    """Convert an RGB image into a 5D feature space for Mean-Shift.
+
+    Each pixel becomes (spatial_weight*row, spatial_weight*col, R, G, B).
+
+    Args:
+        image (np.array): Input RGB image of shape (H, W, 3), uint8.
+        spatial_weight (float): Weight for spatial coordinates.
+
+    Returns:
+        features (np.array): Feature array of shape (H*W, 5), float64.
+    """
+    # TASK 1.1 #
+    features = np.zeros((image.shape[0] * image.shape[1], 5), dtype=np.float64)
+    for i in range(image.shape[0]):
+        for j in range(image.shape[1]):
+            features[i * image.shape[1] + j, 0] = spatial_weight * i
+            features[i * image.shape[1] + j, 1] = spatial_weight * j
+            features[i * image.shape[1] + j, 2:] = image[i, j, :]
+
+    # TASK 1.1 #
+
+    return features
+
+
+# TASK 1.2 #
+def mean_shift_step(data: np.array, point: np.array, bandwidth: float) -> np.array:
+    """Compute a single Mean-Shift update for a given point.
+
+    1. Compute Euclidean distances from point to all data points.
+    2. Apply Gaussian kernel: w_i = exp(-||x_i - point||^2 / (2 * bandwidth^2)).
+    3. Compute weighted mean: new_point = sum(w_i * x_i) / sum(w_i).
+
+    Args:
+        data (np.array): All data points, shape (N, D).
+        point (np.array): Current point, shape (D,).
+        bandwidth (float): Kernel bandwidth parameter.
+
+    Returns:
+        new_point (np.array): Updated point after one mean-shift step, shape (D,).
+    """
+    # TASK 1.2 #
+    distances = np.linalg.norm(data - point, axis=1)
+    weights = np.exp(- (distances ** 2) / (2 * (bandwidth ** 2)))
+    new_point = np.sum(weights[:, np.newaxis] * data, axis=0) / np.sum(weights)
+
+
+    # TASK 1.2 #
+
+    return new_point
+
+
+# TASK 1.3 #
+def mean_shift_segmentation(data: np.array, bandwidth: float,
+                            threshold: float = 1e-3, max_iter: int = 50) -> np.array:
+    """Run Mean-Shift segmentation on the data.
+
+    For each point:
+        1. Iteratively apply mean_shift_step() until shift < threshold or max_iter.
+        2. Record the converged mode.
+    After all points converge:
+        3. Merge modes within bandwidth/2 of each other.
+        4. Assign segment labels.
+
+    Args:
+        data (np.array): Feature array of shape (N, D).
+        bandwidth (float): Kernel bandwidth.
+        threshold (float): Convergence threshold for shift distance.
+        max_iter (int): Maximum iterations per point.
+
+    Returns:
+        labels (np.array): Segment label for each data point, shape (N,).
+    """
+    # TASK 1.3 #
+    labels = np.zeros(data.shape[0], dtype=np.int32)
+    modes = np.zeros_like(data)
+    
+    
+    for i in range(data.shape[0]):
+        shift = np.inf
+        iter_count = 0
+        point = data[i]
+        while shift >= threshold and iter_count < max_iter:
+            new_point = mean_shift_step(data, point, bandwidth)
+            shift = np.linalg.norm(new_point - point)
+            iter_count += 1
+            point = new_point
+        modes[i] = point
+
+    cluster_centers = []
+    for i in range (data.shape[0]):
+        assigned = False
+
+        for j, cluster_center in enumerate(cluster_centers):
+            if np.linalg.norm(modes[i] - cluster_center) < bandwidth / 2:
+                labels[i] = j
+                assigned = True
+                break
+
+        if not assigned:
+            cluster_centers.append(modes[i])
+            labels[i] = len(cluster_centers) - 1
+    
+    # TASK 1.3 #
+
+    return labels
+
+
+# ============================================================
+# Part 2: Texture Description and Segmentation (L06)
+# ============================================================
+
+# TASK 2.1 #
+def create_gabor_filter(sigma: float, theta: float, lambd: float, psi: float = 0) -> np.array:
+    """Create a 2D Gabor filter kernel.
+
+    g(x,y) = exp(-(x'^2 + gamma^2 * y'^2)/(2*sigma^2)) * cos(2*pi*x'/lambda + psi)
+    where x' = x*cos(theta) + y*sin(theta), y' = -x*sin(theta) + y*cos(theta),
+    gamma = 0.5 (fixed aspect ratio).
+    Kernel size: (6*sigma+1) x (6*sigma+1).
+
+    Args:
+        sigma (float): Standard deviation of the Gaussian envelope.
+        theta (float): Orientation of the filter in radians.
+        lambd (float): Wavelength of the sinusoidal component.
+        psi (float): Phase offset (default 0).
+
+    Returns:
+        kernel (np.array): 2D Gabor filter kernel.
+    """
+    # TASK 2.1 #
+    gamma = 0.5
+    kernel_size = int(6 * sigma + 1)
+    kernel = np.zeros((kernel_size, kernel_size), dtype=np.float64)
+    center = kernel_size // 2
+    for x in range(kernel_size):
+        for y in range(kernel_size):
+            x_prime = (x - center) * np.cos(theta) + (y - center) * np.sin(theta)
+            y_prime = -(x - center) * np.sin(theta) + (y - center) * np.cos(theta)
+            kernel[x, y] = np.exp(-(x_prime**2 + (gamma**2) * (y_prime**2)) / (2 * sigma**2)) * np.cos(2 * np.pi * x_prime / lambd + psi)
+
+    # TASK 2.1 #
+
+    return kernel
+
+
+# TASK 2.2 #
+def create_log_filter(sigma: int) -> np.array:
+    """Create a Laplacian of Gaussian (LoG) kernel.
+
+    Kernel size: (6*sigma+1) x (6*sigma+1).
+
+    Args:
+        sigma (int): Standard deviation of the Gaussian.
+
+    Returns:
+        kernel (np.array): LoG kernel.
+    """
+    # TASK 2.2 #
+    kernel_size = int(6 * sigma + 1)
+    kernel = np.zeros((kernel_size, kernel_size), dtype=np.float64)
+    center = kernel_size // 2
+    for x in range(kernel_size):
+        for y in range(kernel_size):
+            x_prime = x - center
+            y_prime = y - center
+            r_squared = x_prime**2 + y_prime**2
+            kernel[x, y] = (r_squared - 2 * sigma**2) * np.exp(-r_squared / (2 * sigma**2)) / (2 * np.pi * sigma**6)
+
+
+    # TASK 2.2 #
+
+    return kernel
+
+
+# TASK 2.3 #
+def build_filter_bank_responses(image: np.array, filter_bank: list) -> np.array:
+    """Apply the filter bank to the grayscale image and return D-dimensional features.
+
+    Steps:
+        1. Convert image to grayscale (float64, normalized to [0,1]).
+        2. For each filter kernel in filter_bank, convolve with grayscale image.
+        3. Stack all responses into shape (H, W, D).
+
+    The filter bank contains 12 filters:
+        - 8 Gabor (4 orientations x 2 scales) applied to grayscale
+        - 4 LoG (4 scales) applied to grayscale
+
+    Hint: use convolve(gray, kernel, mode='reflect') from scipy.ndimage.
+
+    Args:
+        image (np.array): Input RGB image of shape (H, W, 3), uint8.
+        filter_bank (list): List of 2D filter kernels.
+
+    Returns:
+        feats (np.array): Feature map of shape (H, W, 12).
+    """
+    # TASK 2.3 #
+    feats = np.zeros((image.shape[0], image.shape[1], len(filter_bank)), dtype=np.float64)
+    grey_scale = np.zeros((image.shape[0], image.shape[1]), dtype=np.float64)
+    for i in range(image.shape[0]):
+        for j in range(image.shape[1]):
+            grey_scale[i, j] = 0.299 * image[i, j, 0] + 0.587 * image[i, j, 1] + 0.114 * image[i, j, 2]
+    grey_scale /= 255.0
+
+    for k, kernel in enumerate(filter_bank):
+        feats[:, :, k] = convolve(grey_scale, kernel, mode='reflect')
+
+
+    # TASK 2.3 #
+
+    return feats
+
+
+# TASK 2.4 #
+from sklearn.cluster import MiniBatchKMeans
+from sklearn.neighbors import KDTree
+
+
+class TextonDictionary:
+    def __init__(self, filter_bank, n_textons=200):
+        self.n_textons = n_textons
+        self.filter_bank = filter_bank
+        self.cluster_centers_ = None  # shape (n_textons, D) after learning
+        self.tree_ = None             # KDTree built from cluster_centers_
+
+    def learn_dictionary(self, training_imgs):
+        """Learn texton dictionary from training images.
+
+        Steps:
+            1. For each training image, call build_filter_bank_responses()
+               to get per-pixel feature vectors of shape (H, W, D).
+            2. Reshape and collect all feature vectors from all images into
+               a single array of shape (total_pixels, D).
+            3. Cluster them using MiniBatchKMeans(n_clusters=self.n_textons).
+            4. Store the cluster centers in self.cluster_centers_.
+            5. Build a KDTree from self.cluster_centers_ and store in self.tree_.
+
+        API reference:
+            kmeans = MiniBatchKMeans(n_clusters=..., random_state=0, batch_size=1000)
+            kmeans.fit(data)          # data: (N, D)
+            kmeans.cluster_centers_   # result: (n_clusters, D)
+
+            self.tree_ = KDTree(self.cluster_centers_)
+
+        Args:
+            training_imgs (list[np.array]): List of training RGB images.
+        """
+        # TASK 2.4a #
+        all_features = []
+        for img in training_imgs:
+            features = build_filter_bank_responses(img, self.filter_bank)
+            features = features.reshape(-1, features.shape[2])
+            all_features.append(features)
+
+        all_features = np.vstack(all_features)
+        kmeans = MiniBatchKMeans(n_clusters=self.n_textons, random_state=0, batch_size=1000)
+        kmeans.fit(all_features)
+        self.cluster_centers_ = kmeans.cluster_centers_
+        self.tree_ = KDTree(self.cluster_centers_)
+       
+        # TASK 2.4a #
+
+        pass
+
+    def assign_textons(self, img):
+        """Assign a texton ID to each pixel of the input image.
+
+        Steps:
+            1. Call build_filter_bank_responses() to get features of shape (H, W, D).
+            2. Reshape to (H*W, D).
+            3. Use self.tree_.query() to find the nearest cluster center for each pixel.
+            4. Reshape the indices to (H, W) as the texton map.
+
+        API reference:
+            distances, indices = self.tree_.query(features, k=1)
+            # features: (N, D)  ->  indices: (N, 1), distances: (N, 1)
+            texton_map = indices.flatten().reshape(H, W)
+
+        Args:
+            img (np.array): Input RGB image of shape (H, W, 3).
+
+        Returns:
+            texton_map (np.array): Texton ID map of shape (H, W).
+        """
+        # TASK 2.4b #
+        features = build_filter_bank_responses(img, self.filter_bank)
+        H, W, D = features.shape
+        features = features.reshape(-1, D)
+        distances, indices = self.tree_.query(features, k=1)
+        texton_map = indices.flatten().reshape(H, W)
+    
+
+        # TASK 2.4b #
+
+        return texton_map
+
+
+# TASK 2.5 #
+def compute_texton_histogram(texton_map: np.array, n_textons: int, window_size: int) -> np.array:
+    """Compute per-pixel texton histogram within a rectangular window.
+
+    For each pixel, gather texton IDs in a window_size x window_size window
+    centered at that pixel. Compute the normalized histogram (sum to 1).
+
+    Args:
+        texton_map (np.array): Texton ID map of shape (H, W).
+        n_textons (int): Number of textons (histogram bins).
+        window_size (int): Side length of the rectangular window.
+
+    Returns:
+        hists (np.array): Per-pixel histogram features of shape (H, W, n_textons).
+    """
+    # TASK 2.5 #
+    H, W = texton_map.shape
+    hists = np.zeros((H, W, n_textons), dtype=np.float64)
+    pad_size = window_size // 2
+    padded_map = np.pad(texton_map, pad_size, mode='reflect')
+
+    for i in range(H):
+        for j in range(W):
+            wimdow = padded_map[i:i+window_size, j:j+window_size]
+            hist, _ = np.histogram(wimdow, bins=np.arange(n_textons + 1))
+            hists[i, j, :] = hist / np.sum(hist) if np.sum(hist) > 0 else hist
+
+    # TASK 2.5 #
+
+    return hists
